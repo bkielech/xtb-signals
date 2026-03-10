@@ -1,0 +1,11 @@
+{
+  "name": "XTB Signal Alerts",
+  "short_name": "Signals",
+  "description": "Trading signals – TA on live stooq.pl data",
+  "start_url": "/index.html",
+  "display": "standalone",
+  "background_color": "#080c14",
+  "theme_color": "#ff9500",
+  "orientation": "portrait",
+  "icons": [{"src":"icon.svg","sizes":"any","type":"image/svg+xml"}]
+}

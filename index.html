@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#080c14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<title>XTB Signal Alerts</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;600;700&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'JetBrains Mono',monospace;background:#080c14;color:#c8d6e5;min-height:100dvh;overflow-x:hidden}
+.sf{font-family:'Space Grotesk',sans-serif}
+.card{background:rgba(12,18,32,.85);border:1px solid #1a2332;border-radius:8px;padding:10px 12px}
+.g{color:#00e5a0}.r{color:#ff6b6b}.y{color:#ffd700}.o{color:#ff9500}.b{color:#5b8dee}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:#1e2d3d;border-radius:3px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes pop{0%{opacity:0;transform:translateY(-20px) scale(.95)}100%{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes glow{0%,100%{box-shadow:0 0 12px #ff950033}50%{box-shadow:0 0 28px #ff950055}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
+.spin{width:10px;height:10px;border:2px solid #ff9500;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;display:inline-block}
+.popup{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:1500;border-radius:12px;padding:14px 20px;min-width:92vw;max-width:95vw;animation:pop .4s ease,glow 2s infinite;backdrop-filter:blur(12px)}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:2000;display:flex;align-items:center;justify-content:center}
+.modal{background:#0c1220;border:1px solid #1a2332;border-radius:12px;padding:20px;width:92%;max-width:400px}
+.toggle{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #1a233233}
+.sw{position:relative;width:42px;height:24px;cursor:pointer;display:inline-block}
+.sw input{opacity:0;width:0;height:0;position:absolute}
+.sw .sl{position:absolute;inset:0;background:#1a2332;border-radius:12px;transition:.3s}
+.sw .sl:before{content:'';position:absolute;width:18px;height:18px;left:3px;bottom:3px;background:#4a5568;border-radius:50%;transition:.3s}
+.sw input:checked+.sl{background:#00e5a044}
+.sw input:checked+.sl:before{transform:translateX(18px);background:#00e5a0}
+.btn{border:none;border-radius:6px;padding:8px 20px;font-weight:700;font-size:12px;cursor:pointer;font-family:'Space Grotesk',sans-serif}
+.btn:active{opacity:.7}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// ═══════════ INSTRUMENTS ═══════════
+const SYMS = ['US500','EU50','GOLD','OIL','WIG20'];
+const INST = {
+  US500:{name:'US500',full:'S&P 500 Futures',icon:'📊',color:'#00e5a0',spread:.4,
+    stooq:'us500',barchart:'https://www.barchart.com/futures/quotes/ES*0',stooqUrl:'https://stooq.pl/q/?s=us500'},
+  EU50:{name:'EU50',full:'Euro Stoxx 50 Fut.',icon:'🇪🇺',color:'#5b8dee',spread:1.6,
+    stooq:'eu50',barchart:'https://www.barchart.com/futures/quotes/FX*0',stooqUrl:'https://stooq.pl/q/?s=eu50'},
+  GOLD:{name:'GOLD',full:'XAU/USD',icon:'🥇',color:'#ffd700',spread:.35,
+    stooq:'xauusd',barchart:'https://www.barchart.com/futures/quotes/GC*0',stooqUrl:'https://stooq.pl/q/?s=xauusd'},
+  OIL:{name:'OIL',full:'Crude Oil WTI',icon:'🛢️',color:'#e67e22',spread:.04,
+    stooq:'cl.f',barchart:'https://www.barchart.com/futures/quotes/CL*0',stooqUrl:'https://stooq.pl/q/?s=cl.f'},
+  WIG20:{name:'WIG20',full:'WIG20 Index',icon:'🇵🇱',color:'#e84393',spread:2.0,
+    stooq:'wig20',barchart:'https://www.barchart.com/stocks/quotes/$WIG20',stooqUrl:'https://stooq.pl/q/?s=wig20'},
+};
+
+// ═══════════ STATE ═══════════
+const S = {
+  running:false, history:{}, alerts:[], tick:0, lastSync:null, fetchCount:0,
+  popup:null, showSettings:false, error:null, loading:false,
+  notif: JSON.parse(localStorage.getItem('ns')||'null') || SYMS.reduce((o,s)=>({...o,[s]:true}),{}),
+};
+SYMS.forEach(s=>S.history[s]=[]);
+let lastAlertTick={}, swReg=null;
+
+// ═══════════ DATA FETCHING (stooq.pl via CORS proxy) ═══════════
+const PROXIES = [
+  u => 'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+  u => 'https://corsproxy.io/?url='+encodeURIComponent(u),
+];
+
+async function fetchCSV(url){
+  for(const proxy of PROXIES){
+    try{
+      const r=await fetch(proxy(url),{signal:AbortSignal.timeout(12000)});
+      if(r.ok)return await r.text();
+    }catch(e){}
+  }
+  // Try direct (might work on some hosts)
+  try{const r=await fetch(url,{signal:AbortSignal.timeout(8000)});if(r.ok)return await r.text()}catch(e){}
+  return null;
+}
+
+function parseStooqCSV(csv){
+  if(!csv)return[];
+  const lines=csv.trim().split('\n').filter(l=>l.trim()&&!l.startsWith('Date')&&!l.startsWith('Symbol')&&!l.startsWith('No'));
+  // Handle header row
+  const all=csv.trim().split('\n');
+  const hasHeader=all[0]&&(all[0].includes('Date')||all[0].includes('Close'));
+  const dataLines=hasHeader?all.slice(1):all;
+  const results=[];
+  for(const line of dataLines){
+    const parts=line.split(',');
+    if(parts.length<5)continue;
+    // Stooq format: Date,Open,High,Low,Close,Volume (or with Symbol prefix)
+    let dateIdx=0,closeIdx=4;
+    if(parts.length>=7){dateIdx=1;closeIdx=5} // has symbol column
+    const close=parseFloat(parts[closeIdx]);
+    if(!isNaN(close)&&close>0)results.push(close);
+  }
+  return results;
+}
+
+async function fetchHistory(sym){
+  const inst=INST[sym];
+  const end=new Date();
+  const start=new Date();start.setDate(start.getDate()-60);
+  const d1=start.toISOString().slice(0,10).replace(/-/g,'');
+  const d2=end.toISOString().slice(0,10).replace(/-/g,'');
+  const url=`https://stooq.pl/q/d/l/?s=${inst.stooq}&d1=${d1}&d2=${d2}&i=d`;
+  const csv=await fetchCSV(url);
+  const prices=parseStooqCSV(csv);
+  return prices; // oldest first from stooq
+}
+
+async function fetchCurrentPrice(sym){
+  const inst=INST[sym];
+  // Fetch last 3 days to get current
+  const end=new Date();
+  const start=new Date();start.setDate(start.getDate()-5);
+  const d1=start.toISOString().slice(0,10).replace(/-/g,'');
+  const d2=end.toISOString().slice(0,10).replace(/-/g,'');
+  const url=`https://stooq.pl/q/d/l/?s=${inst.stooq}&d1=${d1}&d2=${d2}&i=d`;
+  const csv=await fetchCSV(url);
+  const prices=parseStooqCSV(csv);
+  return prices.length>0?prices[prices.length-1]:null;
+}
+
+async function fetchAllPrices(){
+  const results={};
+  await Promise.allSettled(SYMS.map(async sym=>{
+    const p=await fetchCurrentPrice(sym);
+    if(p)results[sym]=p;
+  }));
+  return results;
+}
+
+async function loadHistoricalData(){
+  S.loading=true;S.error=null;render();
+  let loaded=0;
+  await Promise.allSettled(SYMS.map(async sym=>{
+    try{
+      const hist=await fetchHistory(sym);
+      if(hist&&hist.length>3){
+        S.history[sym]=hist;
+        loaded++;
+      }
+    }catch(e){console.error(sym,e)}
+  }));
+  S.loading=false;
+  if(loaded===0)S.error='Nie udało się pobrać danych. Sprawdź połączenie.';
+  else if(loaded<SYMS.length)S.error=`Załadowano ${loaded}/${SYMS.length} instrumentów`;
+  render();
+  return loaded>0;
+}
+
+// ═══════════ TA ═══════════
+function sma(a,n){if(a.length<n)return null;return a.slice(-n).reduce((s,v)=>s+v,0)/n}
+function rsi(a,n=14){if(a.length<n+1)return 50;let g=0,l=0;for(let i=a.length-n;i<a.length;i++){const d=a[i]-a[i-1];d>0?g+=d:l-=d}return l===0?100:100-100/(1+g/l)}
+function bollinger(a,n=20){if(a.length<n)return null;const s=a.slice(-n),m=s.reduce((x,v)=>x+v,0)/n,std=Math.sqrt(s.reduce((x,v)=>x+(v-m)**2,0)/n);return{upper:m+2*std,mid:m,lower:m-2*std,std}}
+function macdH(a){if(a.length<26)return 0;const e=(d,p)=>{const k=2/(p+1);let r=d[0];for(let i=1;i<d.length;i++)r=d[i]*k+r*(1-k);return r};return e(a.slice(-26),12)-e(a.slice(-26),26)}
+
+function analyze(hist,sym){
+  if(hist.length<25)return null;
+  const p=hist[hist.length-1],r=rsi(hist,14),s10=sma(hist,10),s20=sma(hist,20),bb=bollinger(hist,20),mh=macdH(hist);
+  const mom=hist.length>5?(p-hist[hist.length-6])/hist[hist.length-6]*100:0;
+  const sigs=[];let sc=0;
+  if(s10&&s20){if(s10>s20*1.0002){sc+=20;sigs.push('SMA10>20↑')}else if(s10<s20*.9998){sc-=20;sigs.push('SMA10<20↓')}}
+  if(r>70){sc-=25;sigs.push('RSI '+r.toFixed(0)+' OB')}else if(r<30){sc+=25;sigs.push('RSI '+r.toFixed(0)+' OS')}
+  else if(r>58){sc+=12;sigs.push('RSI '+r.toFixed(0)+'↑')}else if(r<42){sc-=12;sigs.push('RSI '+r.toFixed(0)+'↓')}
+  if(bb){if(p>bb.upper){sc-=18;sigs.push('Pow.BB↑')}else if(p<bb.lower){sc+=18;sigs.push('Pon.BB↓')}}
+  if(mh>0){sc+=12;sigs.push('MACD+')}else{sc-=12;sigs.push('MACD−')}
+  if(mom>.5){sc+=18;sigs.push('Mom+'+mom.toFixed(1)+'%')}else if(mom<-.5){sc-=18;sigs.push('Mom'+mom.toFixed(1)+'%')}
+
+  const dir=sc>15?'LONG':sc<-15?'SHORT':null;
+  const conf=Math.min(98,Math.abs(sc));
+  if(!dir||conf<70)return null;
+  const atr=bb?bb.std*2:p*.005;
+  const sl=dir==='LONG'?p-atr*1.5:p+atr*1.5;
+  const tp=dir==='LONG'?p+atr*2.5:p-atr*2.5;
+  return{sym,direction:dir,entry:p,sl,tp,slDiff:+(sl-p).toFixed(2),tpDiff:+(tp-p).toFixed(2),
+    rr:Math.abs((tp-p)/(p-sl)),confidence:conf,taSignals:sigs,rsi:r,momentum:mom,time:new Date()};
+}
+
+// ═══════════ FORMATTING ═══════════
+function fmt(sym,v){if(v==null)return'—';return(sym==='GOLD'||sym==='OIL')?'$'+v.toFixed(2):v.toFixed(2)}
+function fmtD(d){return(d>=0?'+':'')+d.toFixed(1)}
+function ts(d){return d?d.toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—'}
+
+// ═══════════ CHART (Canvas line chart) ═══════════
+function drawChart(id,data,color){
+  const c=document.getElementById(id);if(!c||!data||data.length<2)return;
+  const w=c.clientWidth,h=c.clientHeight||44;
+  c.width=w*2;c.height=h*2;c.style.width=w+'px';c.style.height=h+'px';
+  const ctx=c.getContext('2d');ctx.scale(2,2);
+  const mn=Math.min(...data),mx=Math.max(...data),rng=mx-mn||1;
+  const px=i=>(i/(data.length-1))*w, py=v=>h-((v-mn)/rng)*(h-8)-4;
+  // Grid
+  ctx.strokeStyle='#1a233244';ctx.lineWidth=.5;ctx.setLineDash([2,4]);
+  [.25,.5,.75].forEach(p=>{ctx.beginPath();ctx.moveTo(0,h*p);ctx.lineTo(w,h*p);ctx.stroke()});
+  ctx.setLineDash([]);
+  // Area fill
+  ctx.beginPath();ctx.moveTo(0,h);
+  data.forEach((v,i)=>ctx.lineTo(px(i),py(v)));
+  ctx.lineTo(w,h);ctx.closePath();
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0,color+'30');grad.addColorStop(1,color+'00');
+  ctx.fillStyle=grad;ctx.fill();
+  // Line
+  ctx.beginPath();data.forEach((v,i)=>i?ctx.lineTo(px(i),py(v)):ctx.moveTo(px(i),py(v)));
+  ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.stroke();
+  // End dot
+  ctx.beginPath();ctx.arc(px(data.length-1),py(data[data.length-1]),3,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();
+  // Labels
+  ctx.font='8px JetBrains Mono';ctx.fillStyle='#5a6a7a';
+  ctx.fillText(mx.toFixed(0),2,10);ctx.fillText(mn.toFixed(0),2,h-3);
+}
+
+// ═══════════ NOTIFICATIONS ═══════════
+async function initNotif(){
+  if('Notification'in window&&Notification.permission==='default')await Notification.requestPermission();
+  if('serviceWorker'in navigator)swReg=await navigator.serviceWorker.register('sw.js');
+}
+function notify(sig){
+  if(!S.notif[sig.sym]||Notification.permission!=='granted'||!swReg?.active)return;
+  swReg.active.postMessage({type:'SIGNAL',signal:{
+    title:`${sig.direction} ${sig.sym} (${sig.confidence}%)`,
+    body:`Entry: ${fmt(sig.sym,sig.entry)}\nSL: ${fmt(sig.sym,sig.sl)} (${fmtD(sig.slDiff)})\nTP: ${fmt(sig.sym,sig.tp)} (${fmtD(sig.tpDiff)})\nR:R 1:${sig.rr.toFixed(1)}\nTA: ${sig.taSignals.join(' • ')}`
+  }});
+}
+
+// ═══════════ MAIN LOOP ═══════════
+let tickTimer=null,fetchTimer=null;
+
+async function doFetch(){
+  const prices=await fetchAllPrices();
+  let updated=0;
+  SYMS.forEach(sym=>{
+    if(prices[sym]){
+      const h=S.history[sym];
+      const last=h.length?h[h.length-1]:null;
+      // Only push if price changed (avoid duplicates)
+      if(!last||Math.abs(prices[sym]-last)/last>0.00001){
+        S.history[sym]=[...h,prices[sym]].slice(-300);
+        updated++;
+      }
+    }
+  });
+  if(updated>0){S.lastSync=new Date();S.fetchCount++}
+  checkSignals();
+  render();
+}
+
+function checkSignals(){
+  S.tick++;
+  SYMS.forEach(sym=>{
+    const lt=lastAlertTick[sym]||0;
+    if(S.tick-lt<3)return; // Cooldown: 3 fetch cycles (~3min)
+    const sig=analyze(S.history[sym],sym);
+    if(sig){
+      lastAlertTick[sym]=S.tick;
+      const id=Date.now()+sym;
+      const alert={...sig,id,status:'ACTIVE',paperPnl:null};
+      S.alerts.unshift(alert);
+      S.alerts=S.alerts.slice(0,40);
+      S.popup=alert;
+      setTimeout(()=>{S.popup=null;render()},12000);
+      notify(alert);
+    }
+  });
+  // Paper P&L
+  S.alerts.forEach(a=>{
+    if(a.status!=='ACTIVE')return;
+    const h=S.history[a.sym];if(!h.length)return;
+    const cur=h[h.length-1],pnl=a.direction==='LONG'?cur-a.entry:a.entry-cur,pp=(pnl/a.entry)*100;
+    if((a.direction==='LONG'&&cur<=a.sl)||(a.direction==='SHORT'&&cur>=a.sl)){a.status='❌ SL';a.paperPnl=pp}
+    else if((a.direction==='LONG'&&cur>=a.tp)||(a.direction==='SHORT'&&cur<=a.tp)){a.status='✅ TP';a.paperPnl=pp}
+    else a.paperPnl=pp;
+  });
+}
+
+async function startApp(){
+  S.running=true;S.error=null;render();
+  const ok=await loadHistoricalData();
+  if(!ok){S.running=false;render();return}
+  checkSignals();render();
+  fetchTimer=setInterval(doFetch,60000); // Refresh every 60s
+}
+function stopApp(){S.running=false;clearInterval(fetchTimer);render()}
+function resetApp(){
+  stopApp();SYMS.forEach(s=>S.history[s]=[]);
+  S.alerts=[];S.fetchCount=0;S.lastSync=null;S.tick=0;S.popup=null;S.error=null;
+  lastAlertTick={};render();
+}
+
+// ═══════════ RENDER ═══════════
+function render(){
+  const activeA=S.alerts.filter(a=>a.status==='ACTIVE');
+  const closedA=S.alerts.filter(a=>a.status==='✅ TP'||a.status==='❌ SL');
+  const tpN=closedA.filter(a=>a.status==='✅ TP').length;
+  const wr=closedA.length?((tpN/closedA.length)*100).toFixed(0):'—';
+
+  document.getElementById('app').innerHTML=`
+    ${S.showSettings?settingsHTML():''}
+    ${S.popup?popupHTML(S.popup):''}
+
+    <div style="padding:12px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1a2332">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="width:30px;height:30px;border-radius:7px;background:linear-gradient(135deg,#ff9500,#ff5e3a);display:flex;align-items:center;justify-content:center;font-size:15px">🚨</div>
+        <div><div class="sf" style="font-size:14px;font-weight:700;color:#e8edf2">XTB SIGNALS</div>
+          <div style="font-size:7px;color:#4a5568;letter-spacing:1.5px">STOOQ.PL • TA • DARMOWE</div></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        ${S.loading?'<span class="spin"></span>':''}
+        <span onclick="S.showSettings=true;render()" style="cursor:pointer;font-size:13px">⚙️</span>
+        <div style="display:flex;align-items:center;gap:4px;background:${S.running?'rgba(0,229,160,.1)':'rgba(255,107,107,.1)'};border:1px solid ${S.running?'#00e5a033':'#ff6b6b33'};border-radius:5px;padding:2px 7px;font-size:9px">
+          <div style="width:5px;height:5px;border-radius:50%;background:${S.running?'#00e5a0':'#ff6b6b'};${S.running?'animation:pulse 1s infinite':''}"></div>
+          ${S.running?'LIVE':'OFF'}</div>
+      </div>
+    </div>
+
+    <div style="padding:8px 12px">
+      ${S.error?`<div style="background:rgba(255,107,107,.08);border:1px solid #ff6b6b22;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:9px" class="r">⚠️ ${S.error}</div>`:''}
+
+      <!-- INSTRUMENTS -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:6px;margin-bottom:8px">
+        ${SYMS.map(sym=>{
+          const inst=INST[sym],h=S.history[sym],cur=h.length?h[h.length-1]:null,prev=h.length>1?h[h.length-2]:cur;
+          const chg=cur&&prev?((cur-prev)/prev)*100:0;
+          const r=h.length>15?rsi(h,14):null,s10=sma(h,10),s20=sma(h,20);
+          const bid=cur?cur-inst.spread/2:null,ask=cur?cur+inst.spread/2:null;
+          return`<div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+              <span style="font-size:9px;font-weight:600;color:#e8edf2">${inst.icon} ${sym}</span>
+              ${cur?`<span style="font-size:8px;color:${chg>=0?'#00e5a0':'#ff6b6b'};font-weight:600">${chg>=0?'▲':'▼'}${Math.abs(chg).toFixed(2)}%</span>`:''}
+            </div>
+            ${bid!=null?`<div style="display:flex;justify-content:space-between;margin-bottom:3px">
+              <div><div style="font-size:6px;letter-spacing:1px" class="r">SELL</div><div class="sf r" style="font-size:11px;font-weight:700">${fmt(sym,bid)}</div></div>
+              <div style="text-align:center"><div style="font-size:6px;color:#4a5568">SPRD</div><div style="font-size:7px;color:#5a6a7a">${inst.spread}</div></div>
+              <div style="text-align:right"><div style="font-size:6px;letter-spacing:1px" class="g">BUY</div><div class="sf g" style="font-size:11px;font-weight:700">${fmt(sym,ask)}</div></div>
+            </div>`:`<div class="sf" style="font-size:13px;color:#2d3748;margin-bottom:3px;font-weight:700">—</div>`}
+            <canvas id="c-${sym}" style="width:100%;height:44px;display:block"></canvas>
+            ${r!=null?`<div style="display:flex;gap:5px;margin-top:3px;font-size:7px;align-items:center">
+              <span style="color:${r>70?'#ff6b6b':r<30?'#00e5a0':'#5a6a7a'}">RSI ${r.toFixed(0)}</span>
+              ${s10&&s20?`<span style="color:${s10>s20?'#00e5a0':'#ff6b6b'}">SMA${s10>s20?'↑':'↓'}</span>`:''}
+              <a href="${inst.stooqUrl}" target="_blank" style="font-size:6px;color:#4a5568;text-decoration:none;margin-left:auto">stooq↗</a>
+              <a href="${inst.barchart}" target="_blank" style="font-size:6px;color:#4a5568;text-decoration:none">barchart↗</a>
+            </div>`:''}
+          </div>`}).join('')}
+      </div>
+
+      <!-- SIGNALS -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+        <div class="card">
+          <div style="font-size:8px;letter-spacing:1.5px;margin-bottom:5px;font-weight:600" class="o">🚨 SYGNAŁY (${activeA.length})</div>
+          <div style="max-height:300px;overflow-y:auto">
+            ${activeA.length===0?`<div style="text-align:center;color:#2d3748;padding:20px;font-size:9px">${S.running?'Skanowanie… (min 70%)':'Kliknij START'}</div>`:
+              activeA.map(alertHTML).join('')}
+          </div>
+        </div>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+            <span style="font-size:8px;letter-spacing:1.5px;font-weight:600" class="b">📊 HISTORIA</span>
+            <span style="font-size:8px;color:#4a5568">WR: <span class="y" style="font-weight:600">${wr}%</span></span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:5px">
+            ${[{l:'✅TP',v:tpN,c:'#00e5a0'},{l:'❌SL',v:closedA.length-tpN,c:'#ff6b6b'},{l:'ALL',v:S.alerts.length,c:'#5b8dee'}].map(x=>
+              `<div style="background:${x.c}08;border-radius:3px;padding:2px;text-align:center"><div style="font-size:6px;color:#4a5568">${x.l}</div><div style="font-size:12px;font-weight:700;color:${x.c}">${x.v}</div></div>`).join('')}
+          </div>
+          <div style="max-height:220px;overflow-y:auto">
+            ${closedA.length===0?'<div style="text-align:center;color:#2d3748;padding:12px;font-size:8px">Brak</div>':
+              closedA.map(a=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 4px;border-bottom:1px solid #1a233222;font-size:8px;animation:fadeIn .3s">
+                <span style="color:#8899aa">${a.direction} ${a.sym}</span>
+                <span style="color:${a.paperPnl>=0?'#00e5a0':'#ff6b6b'};font-weight:600">${a.paperPnl>=0?'+':''}${a.paperPnl?.toFixed(3)}%</span>
+                <span style="font-size:7px;color:${a.status==='✅ TP'?'#00e5a066':'#ff6b6b66'}">${a.status}</span>
+              </div>`).join('')}
+          </div>
+        </div>
+      </div>
+
+      <!-- CONTROLS -->
+      <div class="card" style="display:flex;justify-content:center;gap:6px;align-items:center;flex-wrap:wrap">
+        ${!S.running?
+          `<button class="btn" onclick="startApp()" ${S.loading?'disabled':''} style="background:linear-gradient(135deg,#ff9500,#ff5e3a);color:#fff;box-shadow:0 2px 10px #ff950033">${S.loading?'⏳ Ładowanie...':'🚨 START'}</button>`:
+          `<button class="btn" onclick="stopApp()" style="background:#333;color:#ccc">⏸ STOP</button>`}
+        <button class="btn" onclick="resetApp()" style="background:rgba(255,107,107,.08);border:1px solid #ff6b6b22;color:#ff6b6b;font-size:10px">🔄</button>
+        <span style="font-size:7px;color:#3a4a5a">#${S.fetchCount} ${S.lastSync?ts(S.lastSync):''}</span>
+      </div>
+      <div style="text-align:center;margin-top:6px;font-size:6px;color:#1a2332">Dane: stooq.pl (darmowe) • TA: RSI/SMA/BB/MACD/Mom • Odśw. co 60s • Brak API key</div>
+    </div>`;
+
+  requestAnimationFrame(()=>SYMS.forEach(sym=>drawChart('c-'+sym,S.history[sym].slice(-60),INST[sym].color)));
+}
+
+function alertHTML(a){
+  const inst=INST[a.sym];
+  return`<div style="background:${a.direction==='LONG'?'rgba(0,229,160,.04)':'rgba(255,107,107,.04)'};border:1px solid ${a.direction==='LONG'?'#00e5a018':'#ff6b6b18'};border-radius:6px;padding:7px 8px;margin-bottom:5px;animation:fadeIn .3s">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:3px">
+      <div style="display:flex;align-items:center;gap:4px">
+        <span style="background:${a.direction==='LONG'?'rgba(0,229,160,.18)':'rgba(255,107,107,.18)'};color:${a.direction==='LONG'?'#00e5a0':'#ff6b6b'};padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700">${a.direction} ${a.sym}</span>
+        <span style="font-size:7px;color:${a.confidence>=80?'#ffd700':'#ff9500'};font-weight:600">${a.confidence}%</span>
+      </div>
+      ${a.paperPnl!=null?`<span class="sf" style="font-size:10px;font-weight:700;color:${a.paperPnl>=0?'#00e5a0':'#ff6b6b'}">${a.paperPnl>=0?'+':''}${a.paperPnl.toFixed(3)}%</span>`:''}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:2px;font-size:7px;margin-bottom:3px">
+      <div><span style="color:#4a5568">Entry</span><br><span style="color:#e8edf2;font-weight:600">${fmt(a.sym,a.entry)}</span></div>
+      <div><span class="r">SL</span><br><span class="r" style="font-weight:600">${fmt(a.sym,a.sl)}</span><br><span style="font-size:6px;color:#ff6b6b88">(${fmtD(a.slDiff)})</span></div>
+      <div><span class="g">TP</span><br><span class="g" style="font-weight:600">${fmt(a.sym,a.tp)}</span><br><span style="font-size:6px;color:#00e5a088">(${fmtD(a.tpDiff)})</span></div>
+      <div><span style="color:#4a5568">R:R</span><br><span class="y" style="font-weight:600">1:${a.rr.toFixed(1)}</span></div>
+    </div>
+    <div style="font-size:7px;color:#4a5568">📐 ${a.taSignals.join(' • ')}</div>
+    <div style="display:flex;gap:8px;margin-top:3px">
+      <a href="${inst.barchart}" target="_blank" style="font-size:6px;color:#5b8dee;text-decoration:none">📊 Barchart↗</a>
+      <a href="${inst.stooqUrl}" target="_blank" style="font-size:6px;color:#5b8dee;text-decoration:none">📈 Stooq↗</a>
+      <span style="font-size:6px;color:#2d3748;margin-left:auto">${ts(a.time)}</span>
+    </div>
+  </div>`;
+}
+
+function popupHTML(p){
+  return`<div class="popup" style="background:${p.direction==='LONG'?'linear-gradient(135deg,rgba(0,30,15,.97),rgba(0,55,28,.97))':'linear-gradient(135deg,rgba(45,10,10,.97),rgba(65,15,15,.97))'};border:2px solid ${p.direction==='LONG'?'#00e5a0':'#ff6b6b'}">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span class="sf" style="font-size:15px;font-weight:700;color:${p.direction==='LONG'?'#00e5a0':'#ff6b6b'}">🚨 ${p.direction} ${p.sym}</span>
+      <span style="background:rgba(255,255,255,.08);border-radius:20px;padding:2px 10px;font-size:11px;font-weight:700;color:${p.confidence>=80?'#ffd700':'#ff9500'}">${p.confidence}%</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px">
+      <div><div style="font-size:7px;color:#6a7a8a">ENTRY</div><div class="sf" style="font-size:13px;font-weight:700;color:#e8edf2">${fmt(p.sym,p.entry)}</div></div>
+      <div><div style="font-size:7px" class="r">STOP LOSS</div><div class="sf r" style="font-size:13px;font-weight:700">${fmt(p.sym,p.sl)}</div><div style="font-size:9px;color:#ff6b6b88">${fmtD(p.slDiff)}</div></div>
+      <div><div style="font-size:7px" class="g">TAKE PROFIT</div><div class="sf g" style="font-size:13px;font-weight:700">${fmt(p.sym,p.tp)}</div><div style="font-size:9px;color:#00e5a088">${fmtD(p.tpDiff)}</div></div>
+      <div><div style="font-size:7px;color:#6a7a8a">R:R</div><div class="sf y" style="font-size:13px;font-weight:700">1:${p.rr.toFixed(1)}</div></div>
+    </div>
+    <div style="font-size:8px;color:#8899aa">📐 ${p.taSignals.join(' • ')}</div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <a href="${INST[p.sym].barchart}" target="_blank" style="font-size:9px;color:#5b8dee;text-decoration:none">📊 Sprawdź na Barchart↗</a>
+      <a href="${INST[p.sym].stooqUrl}" target="_blank" style="font-size:9px;color:#5b8dee;text-decoration:none">📈 Stooq↗</a>
+    </div>
+    <div onclick="S.popup=null;render()" style="text-align:right;margin-top:4px;font-size:8px;color:#4a5568;cursor:pointer">zamknij ✕</div>
+  </div>`;
+}
+
+function settingsHTML(){
+  return`<div class="modal-bg" onclick="if(event.target===this){S.showSettings=false;render()}">
+    <div class="modal">
+      <div class="sf" style="font-size:15px;font-weight:700;color:#e8edf2;margin-bottom:14px">⚙️ Ustawienia powiadomień</div>
+      <div style="font-size:9px;color:#4a5568;margin-bottom:10px">Wybierz instrumenty, dla których chcesz otrzymywać ciche notyfikacje push (bez dźwięku i wibracji).</div>
+      ${SYMS.map(sym=>`<div class="toggle">
+        <span style="font-size:11px;color:#c8d6e5">${INST[sym].icon} ${sym} — ${INST[sym].full}</span>
+        <label class="sw"><input type="checkbox" ${S.notif[sym]?'checked':''} onchange="S.notif['${sym}']=this.checked;localStorage.setItem('ns',JSON.stringify(S.notif))"><span class="sl"></span></label>
+      </div>`).join('')}
+      <div style="margin-top:14px;font-size:8px;color:#4a5568;line-height:1.5">
+        <strong style="color:#ff9500">ℹ️ Bez klucza API</strong> — dane pobierane za darmo ze stooq.pl.<br>
+        Analiza TA lokalna (RSI, SMA, Bollinger, MACD, Momentum).<br>
+        Przy każdym sygnale sprawdź kontekst makro na Barchart.com.
+      </div>
+      <div style="margin-top:14px;text-align:right">
+        <button class="btn" onclick="S.showSettings=false;render()" style="background:#5b8dee;color:#fff">Gotowe</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ═══════════ INIT ═══════════
+initNotif();
+render();
+</script>
+</body>
+</html>
